@@ -1,0 +1,84 @@
+# أداة تشغيل يدوي (Actions → Run workflow، من الموبايل أو أي مكان) لإضافة
+# unpack-zip.yml لجميع مستودعاتك القديمة دفعة واحدة. آمنة للتكرار:
+# تتجاوز أي مستودع يملك الملف أصلاً، وتتجاوز الـforks والمؤرشف وهذا المستودع نفسه.
+#
+# يحتاج سر GH_PAT (Personal Access Token بصلاحية repo) في هذا المستودع:
+# Settings → Secrets and variables → Actions → New repository secret → GH_PAT
+
+name: Apply unpack-zip to all repos
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'عرض فقط بدون أي تعديل (true/false)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+      - name: Check PAT
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::أضف سر GH_PAT (Personal Access Token بصلاحية repo) أولاً."
+            exit 1
+          fi
+
+      - name: Fetch workflow file content
+        run: |
+          gh api repos/${{ github.repository }}/contents/.github/workflows/unpack-zip.yml \
+            --jq '.content' | base64 -d > /tmp/unpack-zip.yml
+          echo "---"
+          head -5 /tmp/unpack-zip.yml
+
+      - name: Loop over repos and apply
+        run: |
+          OWNER=$(echo "${{ github.repository }}" | cut -d/ -f1)
+          THIS_REPO="${{ github.repository }}"
+          DRY="${{ inputs.dry_run }}"
+
+          gh repo list "$OWNER" --limit 300 \
+            --json nameWithOwner,isArchived,isFork,isTemplate \
+            --jq '.[] | select(.isArchived==false and .isFork==false) | .nameWithOwner' > /tmp/repos.txt
+
+          echo "عدد المستودعات المرشّحة: $(wc -l < /tmp/repos.txt)"
+          echo
+
+          while read -r REPO; do
+            if [ "$REPO" = "$THIS_REPO" ]; then
+              echo "⏭  $REPO — تخطّي (هذا المستودع نفسه)"
+              continue
+            fi
+
+            EXISTS=$(gh api "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
+              --silent -q '.sha' 2>/dev/null || true)
+            if [ -n "$EXISTS" ]; then
+              echo "⏭  $REPO — موجود أصلاً"
+              continue
+            fi
+
+            if [ "$DRY" = "true" ]; then
+              echo "🔎 $REPO — سيُضاف (dry run، لم يُعدَّل شيء)"
+              continue
+            fi
+
+            DEFAULT_BRANCH=$(gh api "repos/$REPO" --jq '.default_branch')
+            CONTENT_B64=$(base64 -w0 /tmp/unpack-zip.yml)
+
+            if gh api -X PUT "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
+              -f message="ci: add zip-unpack workflow" \
+              -f content="$CONTENT_B64" \
+              -f branch="$DEFAULT_BRANCH" >/dev/null 2>/tmp/err.txt; then
+              echo "✅ $REPO — أُضيف"
+            else
+              echo "❌ $REPO — فشل: $(cat /tmp/err.txt)"
+            fi
+          done < /tmp/repos.txt
