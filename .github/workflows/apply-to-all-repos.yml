@@ -60,9 +60,20 @@ jobs:
 
             EXISTS=$(gh api "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
               --silent -q '.sha' 2>/dev/null || true)
+            SHA_ARG=()
             if [ -n "$EXISTS" ]; then
-              echo "⏭  $REPO — موجود أصلاً"
-              continue
+              CUR=$(gh api "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
+                --jq '.content' | base64 -d)
+              if echo "$CUR" | grep -q 'ROOT=/tmp/unz'; then
+                echo "⏭  $REPO — محدّث أصلاً"
+                continue
+              fi
+              if ! echo "$CUR" | grep -q 'name: Unpack ZIP Upload'; then
+                echo "⏭  $REPO — ملف مخصّص، لا يُلمس"
+                continue
+              fi
+              SHA_ARG=(-f sha="$EXISTS")
+              echo "🔄 $REPO — نسخة قديمة، ستُحدَّث"
             fi
 
             if [ "$DRY" = "true" ]; then
@@ -74,8 +85,9 @@ jobs:
             CONTENT_B64=$(base64 -w0 /tmp/unpack-zip.yml)
 
             if gh api -X PUT "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
-              -f message="ci: add zip-unpack workflow" \
+              -f message="ci: add/update zip-unpack workflow" \
               -f content="$CONTENT_B64" \
+              "${SHA_ARG[@]}" \
               -f branch="$DEFAULT_BRANCH" >/dev/null 2>/tmp/err.txt; then
               echo "✅ $REPO — أُضيف"
             else
