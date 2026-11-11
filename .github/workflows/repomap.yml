@@ -1,0 +1,40 @@
+# repomap-managed
+# يحدّث docs/code-index.md تلقائياً بعد كل push على الفرع الافتراضي (توفير توكينز للجلسات القادمة).
+# commit البوت لا يطلق workflows أخرى، ولا ينتج commit إلا عند تغيّر الفهرس فعلاً.
+name: Update code index
+
+on:
+  push:
+    branches: [main, master]
+    paths-ignore:
+      - 'docs/code-index.md'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: repomap-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate index
+        run: |
+          if [ ! -f tools/repomap.py ]; then echo "tools/repomap.py missing"; exit 0; fi
+          python3 tools/repomap.py
+
+      - name: Commit if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/code-index.md
+          if git diff --cached --quiet; then echo "Index unchanged."; exit 0; fi
+          git commit -m "docs: refresh code index"
+          git pull --rebase origin "$GITHUB_REF_NAME" || true
+          git push origin "HEAD:$GITHUB_REF_NAME"

@@ -1,17 +1,19 @@
-# أداة تشغيل يدوي (Actions → Run workflow، من الموبايل أو أي مكان) لإضافة
-# unpack-zip.yml لجميع مستودعاتك القديمة دفعة واحدة. آمنة للتكرار:
-# تتجاوز أي مستودع يملك الملف أصلاً، وتتجاوز الـforks والمؤرشف وهذا المستودع نفسه.
+# تشغيل يدوي (Actions → Run workflow، من الموبايل) لتوزيع أدوات الأتمتة على كل مستودعاتك القديمة:
+#  - unpack-zip.yml       (يُحدَّث إن كانت نسخة قديمة منّا)
+#  - repomap.yml + tools/repomap.py  (فهرس الكود التلقائي لتوفير التوكينز)
+#  - قسم "Token rules" يُضاف لـCLAUDE.md إن وُجد ولم يكن فيه
+# آمن للتكرار: يتجاوز المحدَّث والملفات المخصّصة والـforks والمؤرشف وهذا المستودع.
+# مستودعات CLAUDE.md فيها WebToApp/web-to-app تُسرد في النهاية للمراجعة ولا تُعدَّل تلقائياً.
 #
-# يحتاج سر GH_PAT (Personal Access Token بصلاحية repo) في هذا المستودع:
-# Settings → Secrets and variables → Actions → New repository secret → GH_PAT
+# يحتاج سر GH_PAT (Personal Access Token classic بصلاحيتي repo و workflow) في هذا المستودع.
 
-name: Apply unpack-zip to all repos
+name: Apply tooling to all repos
 
 on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: 'عرض فقط بدون أي تعديل (true/false)'
+        description: 'عرض فقط بدون أي تعديل'
         type: boolean
         default: false
 
@@ -20,77 +22,83 @@ permissions:
 
 jobs:
   apply:
+    if: github.repository == 'Dev-saged/android-template'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       GH_TOKEN: ${{ secrets.GH_PAT }}
+      DRY: ${{ inputs.dry_run }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Check PAT
         run: |
           if [ -z "$GH_TOKEN" ]; then
-            echo "::error::أضف سر GH_PAT (Personal Access Token بصلاحية repo) أولاً."
+            echo "::error::أضف سر GH_PAT (classic، صلاحيتا repo و workflow) أولاً."
             exit 1
           fi
 
-      - name: Fetch workflow file content
-        run: |
-          gh api repos/${{ github.repository }}/contents/.github/workflows/unpack-zip.yml \
-            --jq '.content' | base64 -d > /tmp/unpack-zip.yml
-          echo "---"
-          head -5 /tmp/unpack-zip.yml
-
-      - name: Loop over repos and apply
+      - name: Apply
         run: |
           OWNER=$(echo "${{ github.repository }}" | cut -d/ -f1)
           THIS_REPO="${{ github.repository }}"
-          DRY="${{ inputs.dry_run }}"
+          : > /tmp/review.txt
+
+          # put REPO PATH LOCALFILE MARKER_NEW MARKER_OWN
+          #  - غير موجود: يُضاف
+          #  - موجود وفيه MARKER_NEW: محدَّث أصلاً
+          #  - موجود وفيه MARKER_OWN بدون MARKER_NEW: نسخة قديمة منّا، يُحدَّث
+          #  - غير ذلك: ملف مخصّص لا يُلمس
+          put() {
+            local repo="$1" path="$2" local_file="$3" new="$4" own="$5" sha cur branch args=()
+            sha=$(gh api "repos/$repo/contents/$path" -q '.sha' 2>/dev/null || true)
+            if [ -n "$sha" ]; then
+              cur=$(gh api "repos/$repo/contents/$path" -q '.content' | base64 -d)
+              if echo "$cur" | grep -q "$new"; then echo "   ⏭  $path محدّث"; return; fi
+              if ! echo "$cur" | grep -q "$own"; then echo "   ⏭  $path مخصّص، لا يُلمس"; return; fi
+              args=(-f sha="$sha"); echo "   🔄 $path سيُحدَّث"
+            else
+              echo "   ➕ $path سيُضاف"
+            fi
+            [ "$DRY" = "true" ] && return
+            branch=$(gh api "repos/$repo" -q '.default_branch')
+            if gh api -X PUT "repos/$repo/contents/$path" -f message="ci: add/update $path" \
+                 -f content="$(base64 -w0 "$local_file")" -f branch="$branch" "${args[@]}" >/dev/null 2>/tmp/err.txt; then
+              echo "      ✅ تم"
+            else
+              echo "      ❌ فشل: $(head -c 200 /tmp/err.txt)"
+            fi
+          }
 
           gh repo list "$OWNER" --limit 300 \
-            --json nameWithOwner,isArchived,isFork,isTemplate \
+            --json nameWithOwner,isArchived,isFork \
             --jq '.[] | select(.isArchived==false and .isFork==false) | .nameWithOwner' > /tmp/repos.txt
-
           echo "عدد المستودعات المرشّحة: $(wc -l < /tmp/repos.txt)"
-          echo
 
           while read -r REPO; do
-            if [ "$REPO" = "$THIS_REPO" ]; then
-              echo "⏭  $REPO — تخطّي (هذا المستودع نفسه)"
-              continue
-            fi
+            [ "$REPO" = "$THIS_REPO" ] && continue
+            echo "▶ $REPO"
+            put "$REPO" ".github/workflows/unpack-zip.yml" .github/workflows/unpack-zip.yml 'tools/repomap.py' 'name: Unpack ZIP Upload'
+            put "$REPO" ".github/workflows/repomap.yml" .github/workflows/repomap.yml 'repomap-managed' 'repomap-managed'
+            put "$REPO" "tools/repomap.py" tools/repomap.py 'docs/code-index.md' 'repomap-managed'
 
-            EXISTS=$(gh api "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
-              --silent -q '.sha' 2>/dev/null || true)
-            SHA_ARG=()
-            if [ -n "$EXISTS" ]; then
-              CUR=$(gh api "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
-                --jq '.content' | base64 -d)
-              if echo "$CUR" | grep -q 'ROOT=/tmp/unz'; then
-                echo "⏭  $REPO — محدّث أصلاً"
-                continue
+            CM=$(gh api "repos/$REPO/contents/CLAUDE.md" -q '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
+            if [ -n "$CM" ]; then
+              if echo "$CM" | grep -qi 'web-to-app\|webtoapp'; then echo "$REPO" >> /tmp/review.txt; fi
+              if ! echo "$CM" | grep -q '## Token rules'; then
+                echo "   ➕ CLAUDE.md: قسم Token rules"
+                if [ "$DRY" != "true" ]; then
+                  SHA=$(gh api "repos/$REPO/contents/CLAUDE.md" -q '.sha')
+                  BR=$(gh api "repos/$REPO" -q '.default_branch')
+                  { printf '%s\n' "$CM"; printf '\n'; sed -n '/^## Token rules/,/^## Edit rules/p' CLAUDE.md | sed '$d'; } > /tmp/claude_new.md
+                  gh api -X PUT "repos/$REPO/contents/CLAUDE.md" -f message="docs: add token rules to CLAUDE.md" \
+                    -f content="$(base64 -w0 /tmp/claude_new.md)" -f branch="$BR" -f sha="$SHA" >/dev/null 2>/tmp/err.txt \
+                    && echo "      ✅ تم" || echo "      ❌ فشل: $(head -c 200 /tmp/err.txt)"
+                fi
               fi
-              if ! echo "$CUR" | grep -q 'name: Unpack ZIP Upload'; then
-                echo "⏭  $REPO — ملف مخصّص، لا يُلمس"
-                continue
-              fi
-              SHA_ARG=(-f sha="$EXISTS")
-              echo "🔄 $REPO — نسخة قديمة، ستُحدَّث"
-            fi
-
-            if [ "$DRY" = "true" ]; then
-              echo "🔎 $REPO — سيُضاف (dry run، لم يُعدَّل شيء)"
-              continue
-            fi
-
-            DEFAULT_BRANCH=$(gh api "repos/$REPO" --jq '.default_branch')
-            CONTENT_B64=$(base64 -w0 /tmp/unpack-zip.yml)
-
-            if gh api -X PUT "repos/$REPO/contents/.github/workflows/unpack-zip.yml" \
-              -f message="ci: add/update zip-unpack workflow" \
-              -f content="$CONTENT_B64" \
-              "${SHA_ARG[@]}" \
-              -f branch="$DEFAULT_BRANCH" >/dev/null 2>/tmp/err.txt; then
-              echo "✅ $REPO — أُضيف"
-            else
-              echo "❌ $REPO — فشل: $(cat /tmp/err.txt)"
             fi
           done < /tmp/repos.txt
+
+          echo
+          echo "=== مستودعات CLAUDE.md فيها WebToApp قديم (مراجعة يدوية) ==="
+          cat /tmp/review.txt || true

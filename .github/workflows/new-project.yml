@@ -1,0 +1,94 @@
+# إنشاء مشروع جديد بضغطة واحدة (Actions → Run workflow، من الموبايل):
+# ينشئ مستودعاً من هذا القالب، يعبّئ اسم المشروع في ملفات القواعد، وينسخ أسرار التوقيع اختيارياً.
+# يحتاج سر GH_PAT (Personal Access Token classic بصلاحية repo) في هذا المستودع.
+# لنسخ التوقيع: أضف هنا أيضاً KEYSTORE_BASE64 / SIGNING_STORE_PASSWORD / SIGNING_KEY_ALIAS / SIGNING_KEY_PASSWORD.
+
+name: New project from template
+
+on:
+  workflow_dispatch:
+    inputs:
+      name:
+        description: 'اسم المستودع الجديد (إنجليزي بلا مسافات، مثل Hisab)'
+        type: string
+        required: true
+      description:
+        description: 'وصف قصير'
+        type: string
+        default: ''
+      private:
+        description: 'مستودع خاص'
+        type: boolean
+        default: true
+      copy_signing:
+        description: 'انسخ أسرار التوقيع من هذا المستودع (نفس المفتاح لكل التطبيقات)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  create:
+    if: github.repository == 'Dev-saged/android-template'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+      NAME: ${{ inputs.name }}
+      DESC: ${{ inputs.description }}
+      PRIVATE: ${{ inputs.private }}
+      COPY_SIGNING: ${{ inputs.copy_signing }}
+      TEMPLATE: ${{ github.repository }}
+      KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+      SIGNING_STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
+      SIGNING_KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
+      SIGNING_KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
+    steps:
+      - name: Validate
+        run: |
+          if [ -z "$GH_TOKEN" ]; then echo "::error::أضف سر GH_PAT أولاً."; exit 1; fi
+          if ! echo "$NAME" | grep -Eq '^[A-Za-z0-9._-]{1,60}$'; then
+            echo "::error::اسم غير صالح: استخدم حروفاً إنجليزية وأرقاماً و - _ . فقط."; exit 1
+          fi
+
+      - name: Ensure this repo is a template
+        run: gh api -X PATCH "repos/$TEMPLATE" -F is_template=true --silent
+
+      - name: Create repository from template
+        run: |
+          OWNER=${TEMPLATE%%/*}
+          VIS=--private; [ "$PRIVATE" = "true" ] || VIS=--public
+          if gh repo view "$OWNER/$NAME" >/dev/null 2>&1; then
+            echo "::error::المستودع $OWNER/$NAME موجود أصلاً."; exit 1
+          fi
+          gh repo create "$OWNER/$NAME" --template "$TEMPLATE" $VIS --description "$DESC"
+          echo "OWNER=$OWNER" >> "$GITHUB_ENV"
+
+      - name: Fill project name in rule files
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            gh repo clone "$OWNER/$NAME" /tmp/newrepo -- --depth 1 >/dev/null 2>&1 && [ -f /tmp/newrepo/CLAUDE.md ] && break
+            rm -rf /tmp/newrepo; sleep 5
+          done
+          [ -f /tmp/newrepo/CLAUDE.md ] || { echo "::error::تعذّر استنساخ المستودع الجديد"; exit 1; }
+          cd /tmp/newrepo
+          sed -i "s/{{PROJECT_NAME}}/$NAME/g" CLAUDE.md docs/repo-map.md .claude/session-handoff.md version.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "chore: set project name" || echo "nothing to change"
+          git push origin HEAD
+
+      - name: Copy signing secrets
+        if: inputs.copy_signing
+        run: |
+          set_secret() { [ -n "$2" ] && gh secret set "$1" -R "$OWNER/$NAME" --body "$2" && echo "set $1"; }
+          set_secret KEYSTORE_BASE64 "$KEYSTORE_BASE64"
+          set_secret SIGNING_STORE_PASSWORD "$SIGNING_STORE_PASSWORD"
+          set_secret SIGNING_KEY_ALIAS "$SIGNING_KEY_ALIAS"
+          set_secret SIGNING_KEY_PASSWORD "$SIGNING_KEY_PASSWORD"
+          true
+
+      - name: Done
+        run: echo "::notice::https://github.com/$OWNER/$NAME — ارفع ملف المشروع .zip في الجذر وسيُفك ويُبنى تلقائياً."

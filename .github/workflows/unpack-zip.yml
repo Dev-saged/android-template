@@ -64,6 +64,7 @@ jobs:
 
           (cd "$SRC" && tar --exclude='./.github' -cf - .) | tar -xmf -
           git rm -q "$ZIP"
+          [ -f tools/repomap.py ] && python3 tools/repomap.py || true
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
