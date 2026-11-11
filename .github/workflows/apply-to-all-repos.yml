@@ -51,16 +51,17 @@ jobs:
           #  - غير ذلك: ملف مخصّص لا يُلمس
           put() {
             local repo="$1" path="$2" local_file="$3" new="$4" own="$5" sha cur branch args=()
-            sha=$(gh api "repos/$repo/contents/$path" -q '.sha' 2>/dev/null || true)
+            sha=$(gh api "repos/$repo/contents/$path" --jq '.sha // empty' 2>/dev/null || true)
+            [ "$sha" = "null" ] && sha=""
             if [ -n "$sha" ]; then
-              cur=$(gh api "repos/$repo/contents/$path" -q '.content' | base64 -d)
+              cur=$(gh api "repos/$repo/contents/$path" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
               if echo "$cur" | grep -q "$new"; then echo "   ⏭  $path محدّث"; return; fi
               if ! echo "$cur" | grep -q "$own"; then echo "   ⏭  $path مخصّص، لا يُلمس"; return; fi
               args=(-f sha="$sha"); echo "   🔄 $path سيُحدَّث"
             else
               echo "   ➕ $path سيُضاف"
             fi
-            [ "$DRY" = "true" ] && return
+            if [ "$DRY" = "true" ]; then return 0; fi
             branch=$(gh api "repos/$repo" -q '.default_branch')
             if gh api -X PUT "repos/$repo/contents/$path" -f message="ci: add/update $path" \
                  -f content="$(base64 -w0 "$local_file")" -f branch="$branch" "${args[@]}" >/dev/null 2>/tmp/err.txt; then
@@ -76,13 +77,13 @@ jobs:
           echo "عدد المستودعات المرشّحة: $(wc -l < /tmp/repos.txt)"
 
           while read -r REPO; do
-            [ "$REPO" = "$THIS_REPO" ] && continue
+            if [ "$REPO" = "$THIS_REPO" ]; then continue; fi
             echo "▶ $REPO"
             put "$REPO" ".github/workflows/unpack-zip.yml" .github/workflows/unpack-zip.yml 'tools/repomap.py' 'name: Unpack ZIP Upload'
             put "$REPO" ".github/workflows/repomap.yml" .github/workflows/repomap.yml 'repomap-managed' 'repomap-managed'
             put "$REPO" "tools/repomap.py" tools/repomap.py 'docs/code-index.md' 'repomap-managed'
 
-            CM=$(gh api "repos/$REPO/contents/CLAUDE.md" -q '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
+            CM=$(gh api "repos/$REPO/contents/CLAUDE.md" --jq '.content // empty' 2>/dev/null | base64 -d 2>/dev/null || true)
             if [ -n "$CM" ]; then
               if echo "$CM" | grep -qi 'web-to-app\|webtoapp'; then echo "$REPO" >> /tmp/review.txt; fi
               if ! echo "$CM" | grep -q '## Token rules'; then
